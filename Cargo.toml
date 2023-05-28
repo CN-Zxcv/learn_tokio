@@ -12,3 +12,10 @@ bytes = "1"
 futures = "0.3.28"
 crossbeam = "0.8.2"
 tokio-stream = "0.1.14"
+criterion = "0.5.1"
+lazy_static = "1.4.0"
+parking_lot = "0.12.1"
+
+[[bench]]
+name = "hello-bench"
+harness = false
