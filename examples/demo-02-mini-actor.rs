@@ -1,11 +1,11 @@
 #![allow(unused)]
 
 use futures::channel::oneshot;
-use tokio::sync::mpsc::{UnboundedSender, self};
+use std::any::Any;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::any::Any;
 use std::time::Instant;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 // Actor 具有的特征
 trait Actor: 'static + Send + Sync {
@@ -25,26 +25,31 @@ struct AddressInner<A: Actor> {
 impl<A: Actor> Address<A> {
     fn new(tx: UnboundedSender<MessageHandler<A>>) -> Self {
         Self {
-            inner: Arc::new(AddressInner { tx: tx })
+            inner: Arc::new(AddressInner { tx: tx }),
         }
     }
 
-    async fn send<M>(&self, msg: M) -> Result<M::Result, AddressErr> where
+    async fn send<M>(&self, msg: M) -> Result<M::Result, AddressErr>
+    where
         A: Handler<M>,
         M: Message + 'static,
     {
         let (tx, rx) = oneshot::channel();
         let msg = Box::new(ActorMessage::new(msg, Some(tx)));
-        if let Ok(_) = self.inner.tx.send(msg) {
-            match rx.await {
+        let res = self.inner.tx.send(msg);
+        match res {
+            Ok(_) => match rx.await {
                 Ok(res) => Ok(res),
-                Err(_) => Err(AddressErr::ReceiverError),
+                Err(e) => {
+                    println!("rx err, {:?}", e);
+                    Err(AddressErr::ReceiverError)
+                }
+            },
+            Err(e) => {
+                println!("tx err, {}", e);
+                Err(AddressErr::SenderInvalid)
             }
-
-        } else {
-            Err(AddressErr::SenderInvalid)
         }
-
     }
 }
 
@@ -59,16 +64,20 @@ impl<A: Actor> Clone for Address<A> {
 type MessageHandler<A> = Box<dyn ActorMessageHandler<A> + Sync + Send>;
 
 // 通过 channel 实际传递的消息需要的特征
-trait ActorMessageHandler<A>: Sync + Send where
-    A: Actor
+trait ActorMessageHandler<A>: Sync + Send
+where
+    A: Actor,
 {
-    fn handle(&mut self, actor: &mut A, ctx: &mut ActorContext<A>);
+    fn handle(&mut self, actor: &mut A, ctx: &mut A::Context);
 }
 
+// type Responser<M> = oneshot::Sender<Result<M::Result, AddressErr>>;
+
 // channel 传递的send/notify消息结构
-struct ActorMessage<A, M> where
+struct ActorMessage<A, M>
+where
     A: Actor + Handler<M>,
-    M: Message
+    M: Message,
 {
     msg: Option<M>,
     tx: Option<oneshot::Sender<M::Result>>,
@@ -76,37 +85,70 @@ struct ActorMessage<A, M> where
     _phan: PhantomData<A>,
 }
 
-impl<A, M> ActorMessage<A, M> where 
+impl<A, M> ActorMessage<A, M>
+where
     A: Actor + Handler<M>,
     M: Message,
 {
     fn new(msg: M, tx: Option<oneshot::Sender<M::Result>>) -> ActorMessage<A, M> {
-        ActorMessage { msg: Some(msg), tx: tx, create_at: Instant::now(), _phan: PhantomData }
+        ActorMessage {
+            msg: Some(msg),
+            tx: tx,
+            create_at: Instant::now(),
+            _phan: PhantomData,
+        }
     }
 
+    fn handle(&mut self, actor: &mut A, ctx: &mut A::Context) {
+        println!("ActorMessage::handle");
+
+        if let Some(msg) = self.msg.take() {
+            let result = actor.handle(msg, ctx);
+            self.response(result);
+        } else {
+            println!("handle err, error message");
+            // self.response(Err(AddressErr::MessageError));
+        }
+    }
+
+    fn response(&mut self, result: M::Result) {
+        if let Some(tx) = self.tx.take() {
+            match tx.send(result) {
+                Ok(_) => {}
+                Err(e) => {
+                    println!("response err");
+                }
+            }
+        }
+    }
 }
 
 // 让 Actormessge 可以被传递
-impl<A, M> ActorMessageHandler<A> for ActorMessage<A, M> where
+impl<A, M> ActorMessageHandler<A> for ActorMessage<A, M>
+where
     A: Actor + Handler<M>,
     M: Message,
 {
-    fn handle(&mut self, actor: &mut A, ctx: &mut ActorContext<A>) {
+    fn handle(&mut self, actor: &mut A, ctx: &mut A::Context) {
+        // TODO 这里的 handle dispatch 是个什么规则 ?
+        // ActorMessageHandler::handle 和 ActorMessage::handle 签名一样
+        // 不写 ActorMessage::handle 会死循环，写了能正确 dispatch
         self.handle(actor, ctx)
+        //
+        // TODO 看看文档
+        // 这里其实可以直接写逻辑的, 不过看起来不能添加方法，是为什么
     }
 }
 
 // Actor 的运行环境
 struct ActorContext<A: Actor> {
-    addr: Address<A>
+    addr: Address<A>,
 }
 
 // Actor 的运行环境
 impl<A: Actor> ActorContext<A> {
     fn new(addr: Address<A>) -> Self {
-        ActorContext {
-            addr,
-        }
+        ActorContext { addr }
     }
 
     fn addr(&self) -> Address<A> {
@@ -114,11 +156,14 @@ impl<A: Actor> ActorContext<A> {
         // self.addr.0.as_any().downcast_ref::<Address<A>>().expect("address").clone()
     }
 
-    fn run(&self) {
+    async fn run(&mut self, mut actor: A, mut rx: UnboundedReceiver<MessageHandler<A>>) {
         println!("run");
+        while let Some(mut msg) = rx.recv().await {
+            // println!("recv, {:?}", msg)
+            msg.handle(&mut actor, self);
+        }
     }
 }
-
 
 struct BoxedAddress(Arc<dyn AddressInterface>);
 
@@ -132,12 +177,12 @@ trait AddressInterface {
 
 impl<A: Actor> AddressInterface for Address<A> {}
 
-
 // Address 调用错误
 #[derive(Debug)]
 enum AddressErr {
     SenderInvalid,
     ReceiverError,
+    MessageError,
 }
 
 // Actor 消息处理特征
@@ -147,7 +192,8 @@ trait Message: Sync + Send {
 
 // Actor 消息处理特征
 // #[async_trait]
-trait Handler<M> where
+trait Handler<M>
+where
     Self: Actor,
     M: Message,
 {
@@ -162,8 +208,8 @@ struct ActorSystemInner {}
 
 impl ActorSystem {
     fn new() -> Self {
-        ActorSystem { 
-            inner:  Arc::new(ActorSystemInner {  })
+        ActorSystem {
+            inner: Arc::new(ActorSystemInner {}),
         }
     }
 
@@ -173,7 +219,7 @@ impl ActorSystem {
 
         let cloned_addr = addr.clone();
         tokio::spawn(async move {
-            ActorContext::new(cloned_addr).run();
+            ActorContext::new(cloned_addr).run(actor, rx).await;
         });
 
         addr
@@ -200,18 +246,17 @@ mod tests {
         };
 
         impl Handler<Set> for MyActor {
-            fn handle(&mut self, msg: Set, ctx: &mut ActorContext<MyActor>) -> <Set as Message>::Result {
+            fn handle(&mut self, msg: Set, ctx: &mut Self::Context) -> <Set as Message>::Result {
                 println!("handle {:?}", msg);
                 true
             }
         }
-        
+
         let sys = ActorSystem::new();
         let addr = sys.add_actor(MyActor {});
         match addr.send(Set {}).await {
             Ok(done) => println!("done"),
             Err(e) => println!("err {:?}", e),
         }
-        
     }
 }
