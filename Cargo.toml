@@ -15,6 +15,7 @@ tokio-stream = "0.1.14"
 criterion = "0.5.1"
 lazy_static = "1.4.0"
 parking_lot = "0.12.1"
+async-trait = "0.1.68"
 
 [[bench]]
 name = "hello-bench"
