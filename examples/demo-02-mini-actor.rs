@@ -4,13 +4,12 @@ use futures::channel::oneshot;
 use std::any::Any;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::thread;
 use std::time::Instant;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use std::thread;
 
 // Actor 具有的特征
-trait Actor: 'static + Send + Sync {
-}
+trait Actor: 'static + Send + Sync {}
 
 // Actor 对外的引用
 // 线程内共享 Arc，线程间共享 clone
@@ -29,7 +28,8 @@ impl<A: Actor> Address<A> {
         }
     }
 
-    async fn send<M>(&self, msg: M) -> Result<M::Result, AddressErr>
+    // 请求并等待回复
+    async fn call<M>(&self, msg: M) -> Result<M::Result, AddressErr>
     where
         A: Handler<M>,
         M: Message + 'static,
@@ -51,6 +51,31 @@ impl<A: Actor> Address<A> {
             }
         }
     }
+
+    // 只发送
+    fn send<M>(&self, msg: M) -> Result<(), AddressErr>
+    where
+        A: Handler<M>,
+        M: Message + 'static,
+    {
+        let msg = Box::new(ActorMessage::new(msg, None));
+        let res = self.inner.tx.send(msg);
+        match res {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                println!("tx err, {}", e);
+                Err(AddressErr::SenderInvalid)
+            }
+        }
+    }
+
+    // // 回调
+    // fn callback<M>(&self, msg: M) {}
+
+    // // 函数发送到 actor 中执行，并返回执行结果
+    // async fn exec_sync<M>(&self, msg: M) {}
+    // // 函数发送到 actor 中执行，只管发送成功，不期待结果
+    // fn exec_async<M>(&self, msg: M) {}
 }
 
 impl<A: Actor> Clone for Address<A> {
@@ -144,9 +169,9 @@ struct ActorContext<A: Actor> {
 }
 
 // Actor 的运行环境
-impl<A> ActorContext<A> 
+impl<A> ActorContext<A>
 where
-    A: Actor
+    A: Actor,
 {
     fn new(addr: Address<A>) -> Self {
         ActorContext { addr }
@@ -177,7 +202,7 @@ trait AddressInterface {
 impl<A: Actor> AddressInterface for Address<A> {}
 
 // Address 调用错误
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum AddressErr {
     SenderInvalid,
     ReceiverError,
@@ -199,17 +224,16 @@ where
     fn handle(&mut self, msg: M, ctx: &mut ActorContext<Self>) -> M::Result;
 }
 
-struct ActorSystem {
-}
+struct ActorSystem {}
 
 impl ActorSystem {
     fn new() -> Self {
         ActorSystem {}
     }
 
-    fn add_actor<A>(&self, actor: A) -> Address<A> 
+    fn add_actor<A>(&self, actor: A) -> Address<A>
     where
-        A: Actor
+        A: Actor,
     {
         let (tx, rx) = mpsc::unbounded_channel();
         let addr = Address::new(tx);
@@ -227,15 +251,14 @@ fn main() {}
 
 #[cfg(test)]
 mod tests {
-    use std::{vec, time};
+    use std::{collections::HashMap, time, vec};
 
-    #[tokio::test(flavor="multi_thread")]
+    #[tokio::test(flavor = "multi_thread")]
     async fn hello_actor() {
         use super::*;
 
         struct MyActor {};
-        impl Actor for MyActor {
-        };
+        impl Actor for MyActor {};
 
         #[derive(Debug)]
         struct Set {};
@@ -244,7 +267,11 @@ mod tests {
         };
 
         impl Handler<Set> for MyActor {
-            fn handle(&mut self, msg: Set, ctx: &mut ActorContext<Self>) -> <Set as Message>::Result {
+            fn handle(
+                &mut self,
+                msg: Set,
+                ctx: &mut ActorContext<Self>,
+            ) -> <Set as Message>::Result {
                 println!("handle {:?} on tid {:?}", msg, thread::current().id());
                 true
             }
@@ -262,11 +289,80 @@ mod tests {
             if let Some(addr) = addrs.get(i % 3) {
                 let addr = addr.clone();
                 tokio::spawn(async move {
-                    let ret = addr.send(Set {}).await;
+                    let ret = addr.call(Set {}).await;
                     println!("ret {:?}", ret);
                 });
             }
         }
         thread::sleep(time::Duration::from_secs(5));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn transfer() {
+        // 请求回复
+        // 通知
+        // 异步回调
+
+        use super::*;
+
+        #[derive(Debug)]
+        struct Set(String, i32);
+
+        impl Message for Set {
+            type Result = bool;
+        }
+
+        #[derive(Debug)]
+        struct Get(String);
+
+        impl Message for Get {
+            type Result = Option<i32>;
+        }
+
+        struct MyActor {
+            store: HashMap<String, i32>,
+        };
+
+        impl Actor for MyActor {}
+
+        impl MyActor {
+            fn new() -> Self {
+                MyActor {
+                    store: HashMap::new(),
+                }
+            }
+        }
+
+        impl Handler<Set> for MyActor {
+            fn handle(
+                &mut self,
+                msg: Set,
+                ctx: &mut ActorContext<Self>,
+            ) -> <Set as Message>::Result {
+                self.store.insert(msg.0, msg.1);
+                return true;
+            }
+        }
+
+        impl Handler<Get> for MyActor {
+            fn handle(
+                &mut self,
+                msg: Get,
+                ctx: &mut ActorContext<Self>,
+            ) -> <Get as Message>::Result {
+                if let Some(v) = self.store.get(&msg.0) {
+                    Some(v.clone())
+                } else {
+                    None
+                }
+            }
+        }
+
+        addr.send(Set("hello".into(), 1));
+
+        let sys = ActorSystem::new();
+        let addr = sys.add_actor(MyActor::new());
+        addr.call(Set("hello".into(), 1)).await;
+        assert_eq!(addr.call(Get("hello".into())).await, Ok(Some(1)));
     }
 }
