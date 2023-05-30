@@ -9,7 +9,6 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 // Actor 具有的特征
 trait Actor: 'static + Send + Sync {
-    type Context: Any;
 }
 
 // Actor 对外的引用
@@ -68,10 +67,8 @@ trait ActorMessageHandler<A>: Sync + Send
 where
     A: Actor,
 {
-    fn handle(&mut self, actor: &mut A, ctx: &mut <A as Actor>::Context);
+    fn handle(&mut self, actor: &mut A, ctx: &mut ActorContext<A>);
 }
-
-// type Responser<M> = oneshot::Sender<Result<M::Result, AddressErr>>;
 
 // channel 传递的send/notify消息结构
 struct ActorMessage<A, M>
@@ -99,7 +96,7 @@ where
         }
     }
 
-    fn handle(&mut self, actor: &mut A, ctx: &mut A::Context) {
+    fn handle(&mut self, actor: &mut A, ctx: &mut ActorContext<A>) {
         println!("ActorMessage::handle");
 
         if let Some(msg) = self.msg.take() {
@@ -129,7 +126,7 @@ where
     A: Actor + Handler<M>,
     M: Message,
 {
-    fn handle(&mut self, actor: &mut A, ctx: &mut A::Context) {
+    fn handle(&mut self, actor: &mut A, ctx: &mut ActorContext<A>) {
         // TODO 这里的 handle dispatch 是个什么规则 ?
         // ActorMessageHandler::handle 和 ActorMessage::handle 签名一样
         // 不写 ActorMessage::handle 会死循环，写了能正确 dispatch
@@ -146,8 +143,9 @@ struct ActorContext<A: Actor> {
 }
 
 // Actor 的运行环境
-impl<A> ActorContext<A> where
-    A: Actor<Context = Self>
+impl<A> ActorContext<A> 
+where
+    A: Actor
 {
     fn new(addr: Address<A>) -> Self {
         ActorContext { addr }
@@ -196,10 +194,10 @@ trait Message: Sync + Send {
 // #[async_trait]
 trait Handler<M>
 where
-    Self: Actor,
+    Self: Actor + Sized,
     M: Message,
 {
-    fn handle(&mut self, msg: M, ctx: &mut Self::Context) -> M::Result;
+    fn handle(&mut self, msg: M, ctx: &mut ActorContext<Self>) -> M::Result;
 }
 
 struct ActorSystem {
@@ -210,8 +208,9 @@ impl ActorSystem {
         ActorSystem {}
     }
 
-    fn add_actor<A>(&self, actor: A) -> Address<A> where
-        A: Actor<Context = ActorContext<A>>
+    fn add_actor<A>(&self, actor: A) -> Address<A> 
+    where
+        A: Actor
     {
         let (tx, rx) = mpsc::unbounded_channel();
         let addr = Address::new(tx);
@@ -235,7 +234,6 @@ mod tests {
 
         struct MyActor {};
         impl Actor for MyActor {
-            type Context = ActorContext<Self>;
         };
 
         #[derive(Debug)]
@@ -245,7 +243,7 @@ mod tests {
         };
 
         impl Handler<Set> for MyActor {
-            fn handle(&mut self, msg: Set, ctx: &mut Self::Context) -> <Set as Message>::Result {
+            fn handle(&mut self, msg: Set, ctx: &mut ActorContext<Self>) -> <Set as Message>::Result {
                 println!("handle {:?}", msg);
                 true
             }
