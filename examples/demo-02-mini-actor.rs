@@ -68,7 +68,7 @@ trait ActorMessageHandler<A>: Sync + Send
 where
     A: Actor,
 {
-    fn handle(&mut self, actor: &mut A, ctx: &mut A::Context);
+    fn handle(&mut self, actor: &mut A, ctx: &mut <A as Actor>::Context);
 }
 
 // type Responser<M> = oneshot::Sender<Result<M::Result, AddressErr>>;
@@ -146,7 +146,9 @@ struct ActorContext<A: Actor> {
 }
 
 // Actor 的运行环境
-impl<A: Actor> ActorContext<A> {
+impl<A> ActorContext<A> where
+    A: Actor<Context = Self>
+{
     fn new(addr: Address<A>) -> Self {
         ActorContext { addr }
     }
@@ -201,19 +203,16 @@ where
 }
 
 struct ActorSystem {
-    inner: Arc<ActorSystemInner>,
 }
-
-struct ActorSystemInner {}
 
 impl ActorSystem {
     fn new() -> Self {
-        ActorSystem {
-            inner: Arc::new(ActorSystemInner {}),
-        }
+        ActorSystem {}
     }
 
-    fn add_actor<A: Actor>(&self, actor: A) -> Address<A> {
+    fn add_actor<A>(&self, actor: A) -> Address<A> where
+        A: Actor<Context = ActorContext<A>>
+    {
         let (tx, rx) = mpsc::unbounded_channel();
         let addr = Address::new(tx);
 
