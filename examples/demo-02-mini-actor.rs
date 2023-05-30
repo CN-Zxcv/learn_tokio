@@ -6,6 +6,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use std::thread;
 
 // Actor 具有的特征
 trait Actor: 'static + Send + Sync {
@@ -97,7 +98,7 @@ where
     }
 
     fn handle(&mut self, actor: &mut A, ctx: &mut ActorContext<A>) {
-        println!("ActorMessage::handle");
+        // println!("ActorMessage::handle");
 
         if let Some(msg) = self.msg.take() {
             let result = actor.handle(msg, ctx);
@@ -165,8 +166,6 @@ where
     }
 }
 
-struct BoxedAddress(Arc<dyn AddressInterface>);
-
 // ActorRef 特征接口
 trait AddressInterface {
     fn as_any(&self) -> &dyn Any {
@@ -228,7 +227,9 @@ fn main() {}
 
 #[cfg(test)]
 mod tests {
-    #[tokio::test]
+    use std::{vec, time};
+
+    #[tokio::test(flavor="multi_thread")]
     async fn hello_actor() {
         use super::*;
 
@@ -244,16 +245,28 @@ mod tests {
 
         impl Handler<Set> for MyActor {
             fn handle(&mut self, msg: Set, ctx: &mut ActorContext<Self>) -> <Set as Message>::Result {
-                println!("handle {:?}", msg);
+                println!("handle {:?} on tid {:?}", msg, thread::current().id());
                 true
             }
         }
 
         let sys = ActorSystem::new();
-        let addr = sys.add_actor(MyActor {});
-        match addr.send(Set {}).await {
-            Ok(done) => println!("done"),
-            Err(e) => println!("err {:?}", e),
+
+        let mut addrs = vec![];
+        for i in 0..3 {
+            let addr = sys.add_actor(MyActor {});
+            addrs.push(addr);
         }
+
+        for i in 0..10 {
+            if let Some(addr) = addrs.get(i % 3) {
+                let addr = addr.clone();
+                tokio::spawn(async move {
+                    let ret = addr.send(Set {}).await;
+                    println!("ret {:?}", ret);
+                });
+            }
+        }
+        thread::sleep(time::Duration::from_secs(5));
     }
 }
