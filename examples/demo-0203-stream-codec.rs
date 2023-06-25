@@ -1,11 +1,11 @@
-use futures_util::stream::{SplitStream};
-use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
-use tokio::net::{TcpStream, TcpListener}; 
-use tokio::sync::mpsc;
-use tokio_util::codec::{Framed, self};
 use bincode;
 use bytes::BufMut;
+use futures_util::stream::SplitStream;
+use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
+use tokio_util::codec::{self, Framed};
 
 type LineFramedStream = SplitStream<Framed<TcpStream, RstRespCodec>>;
 // type LineFramedSink = SplitSink<Framed<TcpStream, RstRespCodec>, RstResp>;
@@ -13,7 +13,7 @@ type LineFramedStream = SplitStream<Framed<TcpStream, RstRespCodec>>;
 #[tokio::main]
 async fn main() {
     let server = TcpListener::bind("localhost:8888").await.unwrap();
-    
+
     let t1 = tokio::spawn(async move {
         while let Ok((client_stream, _)) = server.accept().await {
             tokio::spawn(async move {
@@ -82,7 +82,6 @@ async fn read_from_client_codec(mut reader: LineFramedStream, _msg_tx: mpsc::Sen
     }
 }
 
-
 // 定义协议，需要序列化特征
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Request {
@@ -101,7 +100,6 @@ pub enum RstResp {
     Response(Response),
 }
 
-
 // 实现协议类型的 codec
 pub struct RstRespCodec;
 impl RstRespCodec {
@@ -117,7 +115,9 @@ impl codec::Encoder<RstResp> for RstRespCodec {
 
         let data_len = data.len();
         if data_len > Self::MAX_SIZE {
-            return Err(bincode::Error::new(bincode::ErrorKind::Custom("frame is too large".into())))
+            return Err(bincode::Error::new(bincode::ErrorKind::Custom(
+                "frame is too large".into(),
+            )));
         }
 
         // | data_len; 4 | payload; n |
@@ -150,7 +150,10 @@ impl codec::Decoder for RstRespCodec {
 
         let data_len = u32::from_be_bytes(length_bytes) as usize;
         if data_len > Self::MAX_SIZE {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("frame len {} too large", data_len)));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("frame len {} too large", data_len),
+            ));
         }
 
         // 数据长度不够，重新申请空闲空间，后续数据到来后重新解析
@@ -169,3 +172,23 @@ impl codec::Decoder for RstRespCodec {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use bytes::BytesMut;
+    use tokio_util::codec::{Decoder, Encoder};
+
+    use super::*;
+
+    #[test]
+    fn test_encode_decode() {
+        let item = RstResp::Response(Response(Some("hello".into())));
+        let mut codec = RstRespCodec {};
+        let mut dst = BytesMut::new();
+        codec.encode(item, &mut dst);
+
+        if let Ok(d) = codec.decode(&mut dst) {
+            println!("decode {:?}", d);
+        }
+        // let bin = msg.serialize(serializer)
+    }
+}
